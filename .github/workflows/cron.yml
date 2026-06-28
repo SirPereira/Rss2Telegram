@@ -2,7 +2,7 @@ name: Cron Action
 on:
   workflow_dispatch:
   schedule:
-    - cron: '5 * * * *'
+    - cron: '16 * * * *'
 
 
 jobs:
