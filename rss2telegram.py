@@ -1,6 +1,7 @@
 from bs4 import BeautifulSoup
 from telebot import types
 from time import gmtime
+from dotenv import load_dotenv
 import feedparser
 import os
 import re
@@ -17,6 +18,7 @@ def get_variable(variable):
         return var_file.read()
     return os.environ.get(f'{variable}')
 
+load_dotenv()
 URL = get_variable('URL')
 DESTINATION = get_variable('DESTINATION')
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
