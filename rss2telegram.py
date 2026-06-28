@@ -148,12 +148,41 @@ def send_message(topic, button):
     print(f'... {topic["title"]}')
     time.sleep(0.2)
 
-def get_img(url):
+# CORREÇÃO CRÍTICA: Busca a imagem no post do Blogger e remove os parâmetros de corte automático
+def get_img(blog_url, summary_html):
+    photo = False
     try:
-        response = requests.get(url, headers = {'User-agent': 'Mozilla/5.1'}, timeout=3)
-        html = BeautifulSoup(response.content, 'html.parser')
-        photo = html.find('meta', {'property': 'og:image'})['content']
-    except (TypeError, KeyError, IndexError, requests.exceptions.RequestException):
+        # 1. Tenta extrair a primeira tag <img> diretamente de dentro do resumo do feed RSS
+        soup = BeautifulSoup(summary_html, 'html.parser')
+        img_tag = soup.find('img')
+        if img_tag and img_tag.get('src'):
+            photo = img_tag['src']
+        
+        # 2. Se não achar no feed, faz o scrap da página do post para pegar a imagem original do corpo do texto
+        if not photo:
+            response = requests.get(blog_url, headers={'User-agent': 'Mozilla/5.1'}, timeout=3)
+            html = BeautifulSoup(response.content, 'html.parser')
+            
+            post_body = html.find(class_='post-body')
+            if post_body:
+                img_tag = post_body.find('img')
+                if img_tag and img_tag.get('src'):
+                    photo = img_tag['src']
+            
+            if not photo:
+                og_image = html.find('meta', {'property': 'og:image'})
+                if og_image and og_image.get('content'):
+                    photo = og_image['content']
+                    
+        # 3. Força o tamanho e proporção original sem cortes (Padrão s0/original do Blogger e Google User Content)
+        if photo:
+            if 'googleusercontent.com' in photo or 'blogspot.com' in photo:
+                # Remove parâmetros de cortes e miniaturas nas URLs de caminho (ex: /w640-h360-p/ ou /s640-c/) mudando para /s0/
+                photo = re.sub(r'/(s\d+|w\d+)(-[a-zA-Z0-9-]+)?/', '/s0/', photo)
+                # Remove cortes aplicados via parâmetros de query string (ex: =w1200-h630-p) mudando para =s0
+                photo = re.sub(r'=(w|s)\d+.*$', '=s0', photo)
+                
+    except Exception:
         photo = False
     return photo
 
@@ -193,9 +222,11 @@ def check_topics(url):
     seen_links_this_run = set()
     
     for tpc in feed['items'][:20]:
+        blog_post_link = tpc.links[0].href  # O link real do seu post no Blogger
+        
         soup = BeautifulSoup(tpc.summary, 'html.parser')
         link_tag = soup.find('a', href=True)
-        destination_link = link_tag['href'] if link_tag else tpc.links[0].href
+        destination_link = link_tag['href'] if link_tag else blog_post_link
         
         clean_link = destination_link.split('?')[0].rstrip('/')
         
@@ -209,6 +240,7 @@ def check_topics(url):
             'title': tpc.title.strip(),
             'summary': tpc.summary,
             'link': destination_link,
+            'blog_link': blog_post_link,   # Armazena o link do Blogger para buscar a imagem correta depois
             'clean_link': clean_link,
             'date': tpc.get('published_parsed') or tpc.get('updated_parsed') or time.gmtime()
         }
@@ -218,26 +250,24 @@ def check_topics(url):
         print("Nenhuma postagem nova.")
         return
 
-    # Garante a ordenação estrita: do mais recente para o mais antigo
     unsent_topics.sort(key=lambda x: x['date'], reverse=True)
     
     MAX_SENDS_PER_RUN = int(os.environ.get('MAX_SENDS_PER_RUN', 3)) 
     
-    # Separação estratégica dos lotes
-    topics_to_send = unsent_topics[:MAX_SENDS_PER_RUN]   # Os X mais recentes que vão para o Telegram
-    topics_to_archive = unsent_topics[MAX_SENDS_PER_RUN:] # Os posts mais antigos que sobraram do corte
+    topics_to_send = unsent_topics[:MAX_SENDS_PER_RUN]   
+    topics_to_archive = unsent_topics[MAX_SENDS_PER_RUN:] 
     
-    # MELHORIA CRÍTICA: Queima os posts antigos descartados mandando-os direto pro histórico sem enviar nada
     for old_topic in topics_to_archive:
         add_to_history(old_topic['clean_link'])
         print(f'--- Ignorado e Arquivado (Antigo): {old_topic["title"]}')
     
-    # Envia os posts selecionados na ordem cronológica correta (do mais antigo pro mais novo do lote de 3)
     topics_to_send.reverse() 
     
     for topic in topics_to_send:
         add_to_history(topic['clean_link'])
-        topic['photo'] = get_img(topic['link'])
+        
+        # MUDANÇA AQUI: Agora a função get_img recebe o link do post do Blogger e o resumo HTML
+        topic['photo'] = get_img(topic['blog_link'], topic['summary'])
         
         BUTTON_TEXT = os.environ.get('BUTTON_TEXT', False)
         if BUTTON_TEXT:
