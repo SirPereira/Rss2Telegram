@@ -26,7 +26,6 @@ jobs:
       - name: Install Requirements
         run: pip install -r requirements.txt
       - name: Run Rss to Telegram
-        run: python rss2telegram.py
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           DESTINATION: ${{ vars.DESTINATION }}
@@ -39,6 +38,7 @@ jobs:
           PARAMETERS: ${{ vars.PARAMETERS }}
           TELEGRAPH_TOKEN: ${{ vars.TELEGRAPH_TOKEN }}
           DRYRUN: ${{ steps.download.outcome }}
+        run: python rss2telegram.py  
       - name: Upload history
         uses: actions/upload-artifact@v4
         with:
