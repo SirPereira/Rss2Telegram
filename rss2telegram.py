@@ -181,8 +181,17 @@ def check_topics(url):
         topic['site_name'] = feed['feed']['title']
         topic['title'] = tpc.title.strip()
         topic['summary'] = tpc.summary
-        topic['link'] = tpc.links[0].href
-        topic['photo'] = get_img(tpc.links[0].href)
+        # --- ALTERAÇÃO AQUI: Extrai o link interno do resumo HTML ---
+        soup = BeautifulSoup(tpc.summary, 'html.parser')
+        link_tag = soup.find('a', href=True)
+        
+        # Se encontrar uma tag de link no resumo, usa ela. Caso contrário, usa o link principal do post.
+        destination_link = link_tag['href'] if link_tag else tpc.links[0].href
+        
+        topic['link'] = destination_link
+        topic['photo'] = get_img(destination_link)
+        # ------------------------------------------------------------
+        
         BUTTON_TEXT = os.environ.get('BUTTON_TEXT', False)
         if BUTTON_TEXT:
             BUTTON_TEXT = set_text_vars(BUTTON_TEXT, topic)
