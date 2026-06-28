@@ -2,8 +2,7 @@ name: Cron Action
 on:
   workflow_dispatch:
   schedule:
-    - cron: '16 * * * *'
-
+    - cron: '*/5 * * * *' # Configurado para rodar a cada 5 minutos (mínimo permitido pelo GitHub)
 
 jobs:
   rss2telegram:
@@ -13,19 +12,25 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-      - name: Download artifact
-        id: download
-        continue-on-error: true
-        uses: actions/download-artifact@v8
+
+      # SOLUÇÃO PARA DUPLICADOS: Restaura o banco de dados da execução anterior
+      - name: Restore Database Cache
+        uses: actions/cache/restore@v4
         with:
-          workflow: cron.yml
-          workflow_conclusion: success
+          path: rss2telegram.db
+          key: rss-db-${{ github.run_id }}
+          restore-keys: |
+            rss-db-
+
+      # Setup do Python atualizado para uma versão padrão estável
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.8'
+          python-version: '3.10'
+
       - name: Install Requirements
         run: pip install -r requirements.txt
+
       - name: Run Rss to Telegram
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -38,10 +43,13 @@ jobs:
           BUTTON_TEXT: ${{ vars.BUTTON_TEXT }}
           PARAMETERS: ${{ vars.PARAMETERS }}
           TELEGRAPH_TOKEN: ${{ vars.TELEGRAPH_TOKEN }}
-          DRYRUN: ${{ steps.download.outcome }}
+          DRYRUN: 'success' # Forçado para garantir execução normal com o Cache
         run: python rss2telegram.py  
-      - name: Upload history
-        uses: actions/upload-artifact@v4
+
+      # SOLUÇÃO PARA DUPLICADOS: Salva o banco atualizado para a próxima varredura
+      - name: Save Database Cache
+        uses: actions/cache/save@v4
+        if: always() # Garante o salvamento mesmo se o script terminar com avisos
         with:
-          name: rss2telegram
           path: rss2telegram.db
+          key: rss-db-${{ github.run_id }}
