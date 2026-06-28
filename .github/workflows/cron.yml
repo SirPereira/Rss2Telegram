@@ -8,6 +8,7 @@ on:
 jobs:
   rss2telegram:
     runs-on: ubuntu-latest
+    environment: SQ
     timeout-minutes: 10
     steps:
       - name: Checkout repo
