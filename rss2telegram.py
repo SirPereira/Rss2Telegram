@@ -138,7 +138,6 @@ def send_message(topic, button):
             for dest in DESTINATION.split(','):
                 photo_file = open(filename, 'rb')
                 try:
-                    # REVERTIDO: Voltando a enviar como foto inline (sem cortes e com proporção original)
                     bot.send_photo(dest, photo_file, caption=MESSAGE_TEMPLATE, parse_mode='HTML', reply_markup=btn_link, reply_to_message_id=TOPIC)
                 except telebot.apihelper.ApiTelegramException:
                     topic['photo'] = False
@@ -198,7 +197,6 @@ def check_topics(url):
         link_tag = soup.find('a', href=True)
         destination_link = link_tag['href'] if link_tag else tpc.links[0].href
         
-        # Limpeza padrão do link para checagem estável
         clean_link = destination_link.split('?')[0].rstrip('/')
         
         if clean_link in seen_links_this_run or check_history(clean_link):
@@ -220,13 +218,22 @@ def check_topics(url):
         print("Nenhuma postagem nova.")
         return
 
-    # Ordena do mais recente para o mais antigo
+    # Garante a ordenação estrita: do mais recente para o mais antigo
     unsent_topics.sort(key=lambda x: x['date'], reverse=True)
     
-    # Pega apenas os mais recentes que de fato não foram enviados
     MAX_SENDS_PER_RUN = int(os.environ.get('MAX_SENDS_PER_RUN', 3)) 
-    topics_to_send = unsent_topics[:MAX_SENDS_PER_RUN]
-    topics_to_send.reverse() # Inverte para postar na ordem cronológica correta no Telegram
+    
+    # Separação estratégica dos lotes
+    topics_to_send = unsent_topics[:MAX_SENDS_PER_RUN]   # Os X mais recentes que vão para o Telegram
+    topics_to_archive = unsent_topics[MAX_SENDS_PER_RUN:] # Os posts mais antigos que sobraram do corte
+    
+    # MELHORIA CRÍTICA: Queima os posts antigos descartados mandando-os direto pro histórico sem enviar nada
+    for old_topic in topics_to_archive:
+        add_to_history(old_topic['clean_link'])
+        print(f'--- Ignorado e Arquivado (Antigo): {old_topic["title"]}')
+    
+    # Envia os posts selecionados na ordem cronológica correta (do mais antigo pro mais novo do lote de 3)
+    topics_to_send.reverse() 
     
     for topic in topics_to_send:
         add_to_history(topic['clean_link'])
