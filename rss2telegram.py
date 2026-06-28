@@ -14,8 +14,11 @@ import sqlite3
 
 def get_variable(variable):
     if not os.environ.get(f'{variable}'):
-        var_file = open(f'{variable}.txt', 'r')
-        return var_file.read()
+        try:
+            var_file = open(f'{variable}.txt', 'r')
+            return var_file.read()
+        except FileNotFoundError:
+            return None
     return os.environ.get(f'{variable}')
 
 #load_dotenv()
@@ -112,11 +115,24 @@ def send_message(topic, button):
     else:
         if topic['photo'] and not TELEGRAPH_TOKEN:
             response = requests.get(topic['photo'], headers = {'User-agent': 'Mozilla/5.1'})
-            open('img', 'wb').write(response.content)
+            
+            # Identifica a extensão original correta para salvar o arquivo de imagem intacto
+            ext = '.jpg'
+            if '.png' in topic['photo'].lower():
+                ext = '.png'
+            elif '.webp' in topic['photo'].lower():
+                ext = '.webp'
+            elif '.gif' in topic['photo'].lower():
+                ext = '.gif'
+                
+            filename = f'img{ext}'
+            open(filename, 'wb').write(response.content)
+            
             for dest in DESTINATION.split(','):
-                photo = open('img', 'rb')
+                doc_file = open(filename, 'rb')
                 try:
-                    bot.send_photo(dest, photo, caption=MESSAGE_TEMPLATE, parse_mode='HTML', reply_markup=btn_link, reply_to_message_id=TOPIC)
+                    # MELHORIA: Alterado para send_document para entregar em tamanho completo sem compressão do Telegram
+                    bot.send_document(dest, doc_file, caption=MESSAGE_TEMPLATE, parse_mode='HTML', reply_markup=btn_link, reply_to_message_id=TOPIC)
                 except telebot.apihelper.ApiTelegramException:
                     topic['photo'] = False
                     send_message(topic, button)
@@ -131,7 +147,12 @@ def get_img(url):
         response = requests.get(url, headers = {'User-agent': 'Mozilla/5.1'}, timeout=3)
         html = BeautifulSoup(response.content, 'html.parser')
         photo = html.find('meta', {'property': 'og:image'})['content']
-    except TypeError:
+        
+        # MELHORIA: Limpa assinaturas de redimensionamento e query strings para forçar o download da imagem original em alta resolução
+        if photo:
+            photo = re.sub(r'-\d+x\d+(\.[a-zA-Z0-9]+)$', r'\1', photo)  # Remove sufixos como -640x360.jpg
+            photo = re.sub(r'\?(w|h|resize|fit|scale|quality|ssl)=\d+.*$', '', photo) # Remove cortes por parâmetros ?w=1200
+    except (TypeError, KeyError, IndexError):
         photo = False
     except requests.exceptions.ReadTimeout:
         photo = False
@@ -145,8 +166,6 @@ def define_link(link, PARAMETERS):
             return f'{link}&{PARAMETERS}'
         return f'{link}?{PARAMETERS}'
     return f'{link}'
-
-
 
 def set_text_vars(text, topic):
     cases = {
@@ -163,7 +182,6 @@ def set_text_vars(text, topic):
             continue
     return text.replace('\\n', '\n').replace('{', '').replace('}', '')
 
-
 def check_topics(url):
     now = gmtime()
     feed = feedparser.parse(url)
@@ -173,24 +191,56 @@ def check_topics(url):
         print(f'\nERRO: {url} não parece um feed RSS válido.')
         return
     print(f'\nChecando {source}:{url}')
-    for tpc in reversed(feed['items'][:10]):
-        if check_history(tpc.links[0].href):
+    
+    unsent_topics = []
+    seen_links_this_run = set()
+    
+    # Analisa uma quantidade maior de posts recentes para garantir que nenhuma novidade fique para trás
+    for tpc in feed['items'][:20]:
+        soup = BeautifulSoup(tpc.summary, 'html.parser')
+        link_tag = soup.find('a', href=True)
+        destination_link = link_tag['href'] if link_tag else tpc.links[0].href
+        
+        # MELHORIA: Limpa parâmetros de rastreamento para evitar falhas de duplicidade no histórico
+        clean_link = destination_link.split('?')[0].rstrip('/')
+        
+        # MELHORIA: Evita duplicados no histórico global E duplicados dentro do próprio feed processado agora
+        if clean_link in seen_links_this_run or check_history(clean_link):
             continue
-        add_to_history(tpc.links[0].href)
+            
+        seen_links_this_run.add(clean_link)
+        
         topic = {}
         topic['site_name'] = feed['feed']['title']
         topic['title'] = tpc.title.strip()
         topic['summary'] = tpc.summary
-        # --- ALTERAÇÃO AQUI: Extrai o link interno do resumo HTML ---
-        soup = BeautifulSoup(tpc.summary, 'html.parser')
-        link_tag = soup.find('a', href=True)
-        
-        # Se encontrar uma tag de link no resumo, usa ela. Caso contrário, usa o link principal do post.
-        destination_link = link_tag['href'] if link_tag else tpc.links[0].href
-        
         topic['link'] = destination_link
-        topic['photo'] = get_img(destination_link)
-        # ------------------------------------------------------------
+        topic['clean_link'] = clean_link
+        # Extrai e guarda a data para estruturar a ordem cronológica
+        topic['date'] = tpc.get('published_parsed') or tpc.get('updated_parsed') or time.gmtime()
+        
+        unsent_topics.append(topic)
+        
+    if not unsent_topics:
+        print("Nenhuma postagem nova ou não enviada.")
+        return
+
+    # MELHORIA: Ordena as novidades para analisar o que é mais RECENTE primeiro
+    unsent_topics.sort(key=lambda x: x['date'], reverse=True)
+    
+    # MELHORIA (Anti-Flood): Define o número máximo de postagens enviadas de uma só vez por execução
+    MAX_SENDS_PER_RUN = int(os.environ.get('MAX_SENDS_PER_RUN', 3)) 
+    topics_to_send = unsent_topics[:MAX_SENDS_PER_RUN]
+    
+    # Inverte a seleção para que o envio no Telegram siga a ordem natural de tempo (do mais antigo pro mais novo do lote)
+    topics_to_send.reverse()
+    
+    for topic in topics_to_send:
+        # Adiciona ao histórico usando o link limpo antes do envio para blindar contra repetições paralelas
+        add_to_history(topic['clean_link'])
+        
+        # Coleta a imagem original sem reduções
+        topic['photo'] = get_img(topic['link'])
         
         BUTTON_TEXT = os.environ.get('BUTTON_TEXT', False)
         if BUTTON_TEXT:
@@ -204,4 +254,3 @@ def check_topics(url):
 if __name__ == "__main__":
     for url in URL.split():
         check_topics(url)
-
