@@ -34,19 +34,30 @@ TELEGRAPH_TOKEN = os.environ.get('TELEGRAPH_TOKEN', False)
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-def add_to_history(link):
-    conn = sqlite3.connect('rss2telegram.db')
+# Define o caminho do banco de dados no diretório atual do script
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'rss2telegram.db')
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    aux = f'INSERT INTO history (link) VALUES ("{link}")'
-    cursor.execute(aux)
+    cursor.execute('CREATE TABLE IF NOT EXISTS history (link TEXT UNIQUE)')
     conn.commit()
     conn.close()
 
-def check_history(link):
-    conn = sqlite3.connect('rss2telegram.db')
+def add_to_history(link):
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    aux = f'SELECT * from history WHERE link="{link}"'
-    cursor.execute(aux)
+    try:
+        cursor.execute('INSERT INTO history (link) VALUES (?)', (link,))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        pass
+    conn.close()
+
+def check_history(link):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT * from history WHERE link=?', (link,))
     data = cursor.fetchone()
     conn.close()
     return data
@@ -116,23 +127,19 @@ def send_message(topic, button):
         if topic['photo'] and not TELEGRAPH_TOKEN:
             response = requests.get(topic['photo'], headers = {'User-agent': 'Mozilla/5.1'})
             
-            # Identifica a extensão original correta para salvar o arquivo de imagem intacto
             ext = '.jpg'
-            if '.png' in topic['photo'].lower():
-                ext = '.png'
-            elif '.webp' in topic['photo'].lower():
-                ext = '.webp'
-            elif '.gif' in topic['photo'].lower():
-                ext = '.gif'
+            if '.png' in topic['photo'].lower(): ext = '.png'
+            elif '.webp' in topic['photo'].lower(): ext = '.webp'
+            elif '.gif' in topic['photo'].lower(): ext = '.gif'
                 
             filename = f'img{ext}'
             open(filename, 'wb').write(response.content)
             
             for dest in DESTINATION.split(','):
-                doc_file = open(filename, 'rb')
+                photo_file = open(filename, 'rb')
                 try:
-                    # MELHORIA: Alterado para send_document para entregar em tamanho completo sem compressão do Telegram
-                    bot.send_document(dest, doc_file, caption=MESSAGE_TEMPLATE, parse_mode='HTML', reply_markup=btn_link, reply_to_message_id=TOPIC)
+                    # REVERTIDO: Voltando a enviar como foto inline (sem cortes e com proporção original)
+                    bot.send_photo(dest, photo_file, caption=MESSAGE_TEMPLATE, parse_mode='HTML', reply_markup=btn_link, reply_to_message_id=TOPIC)
                 except telebot.apihelper.ApiTelegramException:
                     topic['photo'] = False
                     send_message(topic, button)
@@ -147,16 +154,7 @@ def get_img(url):
         response = requests.get(url, headers = {'User-agent': 'Mozilla/5.1'}, timeout=3)
         html = BeautifulSoup(response.content, 'html.parser')
         photo = html.find('meta', {'property': 'og:image'})['content']
-        
-        # MELHORIA: Limpa assinaturas de redimensionamento e query strings para forçar o download da imagem original em alta resolução
-        if photo:
-            photo = re.sub(r'-\d+x\d+(\.[a-zA-Z0-9]+)$', r'\1', photo)  # Remove sufixos como -640x360.jpg
-            photo = re.sub(r'\?(w|h|resize|fit|scale|quality|ssl)=\d+.*$', '', photo) # Remove cortes por parâmetros ?w=1200
-    except (TypeError, KeyError, IndexError):
-        photo = False
-    except requests.exceptions.ReadTimeout:
-        photo = False
-    except requests.exceptions.TooManyRedirects:
+    except (TypeError, KeyError, IndexError, requests.exceptions.RequestException):
         photo = False
     return photo
 
@@ -183,7 +181,7 @@ def set_text_vars(text, topic):
     return text.replace('\\n', '\n').replace('{', '').replace('}', '')
 
 def check_topics(url):
-    now = gmtime()
+    init_db()
     feed = feedparser.parse(url)
     try:
         source = feed['feed']['title']
@@ -195,51 +193,43 @@ def check_topics(url):
     unsent_topics = []
     seen_links_this_run = set()
     
-    # Analisa uma quantidade maior de posts recentes para garantir que nenhuma novidade fique para trás
     for tpc in feed['items'][:20]:
         soup = BeautifulSoup(tpc.summary, 'html.parser')
         link_tag = soup.find('a', href=True)
         destination_link = link_tag['href'] if link_tag else tpc.links[0].href
         
-        # MELHORIA: Limpa parâmetros de rastreamento para evitar falhas de duplicidade no histórico
+        # Limpeza padrão do link para checagem estável
         clean_link = destination_link.split('?')[0].rstrip('/')
         
-        # MELHORIA: Evita duplicados no histórico global E duplicados dentro do próprio feed processado agora
         if clean_link in seen_links_this_run or check_history(clean_link):
             continue
             
         seen_links_this_run.add(clean_link)
         
-        topic = {}
-        topic['site_name'] = feed['feed']['title']
-        topic['title'] = tpc.title.strip()
-        topic['summary'] = tpc.summary
-        topic['link'] = destination_link
-        topic['clean_link'] = clean_link
-        # Extrai e guarda a data para estruturar a ordem cronológica
-        topic['date'] = tpc.get('published_parsed') or tpc.get('updated_parsed') or time.gmtime()
-        
+        topic = {
+            'site_name': feed['feed']['title'],
+            'title': tpc.title.strip(),
+            'summary': tpc.summary,
+            'link': destination_link,
+            'clean_link': clean_link,
+            'date': tpc.get('published_parsed') or tpc.get('updated_parsed') or time.gmtime()
+        }
         unsent_topics.append(topic)
         
     if not unsent_topics:
-        print("Nenhuma postagem nova ou não enviada.")
+        print("Nenhuma postagem nova.")
         return
 
-    # MELHORIA: Ordena as novidades para analisar o que é mais RECENTE primeiro
+    # Ordena do mais recente para o mais antigo
     unsent_topics.sort(key=lambda x: x['date'], reverse=True)
     
-    # MELHORIA (Anti-Flood): Define o número máximo de postagens enviadas de uma só vez por execução
+    # Pega apenas os mais recentes que de fato não foram enviados
     MAX_SENDS_PER_RUN = int(os.environ.get('MAX_SENDS_PER_RUN', 3)) 
     topics_to_send = unsent_topics[:MAX_SENDS_PER_RUN]
-    
-    # Inverte a seleção para que o envio no Telegram siga a ordem natural de tempo (do mais antigo pro mais novo do lote)
-    topics_to_send.reverse()
+    topics_to_send.reverse() # Inverte para postar na ordem cronológica correta no Telegram
     
     for topic in topics_to_send:
-        # Adiciona ao histórico usando o link limpo antes do envio para blindar contra repetições paralelas
         add_to_history(topic['clean_link'])
-        
-        # Coleta a imagem original sem reduções
         topic['photo'] = get_img(topic['link'])
         
         BUTTON_TEXT = os.environ.get('BUTTON_TEXT', False)
